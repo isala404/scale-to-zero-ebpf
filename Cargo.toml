@@ -1,0 +1,2 @@
+[workspace]
+members = ["xtask", "scale-to-zero", "scale-to-zero-common"]
