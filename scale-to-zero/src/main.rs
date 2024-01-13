@@ -6,12 +6,13 @@ use aya::{
     Bpf,
 };
 use aya_log::BpfLogger;
-use clap::Parser;
-use log::{info, warn};
-use std::net::Ipv4Addr;
-use scale_to_zero_common::PacketLog;
 use bytes::BytesMut;
-use tokio::{signal, task};
+use clap::Parser;
+use log::{info, warn, debug};
+use scale_to_zero_common::PacketLog;
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
+use tokio::task;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -22,11 +23,17 @@ struct Opt {
     attach_mode: String,
 }
 
+mod kube_watcher;
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
 
     env_logger::init();
+
+    task::spawn(async move {
+        kube_watcher::kube_event_watcher().await.unwrap();
+    });
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
     // runtime. This approach is recommended for most real-world use cases. If you would
@@ -44,8 +51,10 @@ async fn main() -> Result<(), anyhow::Error> {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
-    let program: &mut Xdp =
-        bpf.program_mut("xdp_scale_to_zero_fw").unwrap().try_into()?;
+    let program: &mut Xdp = bpf
+        .program_mut("xdp_scale_to_zero_fw")
+        .unwrap()
+        .try_into()?;
     program.load()?;
 
     let attach_mode = opt.attach_mode.as_str();
@@ -60,14 +69,7 @@ async fn main() -> Result<(), anyhow::Error> {
         panic!("Unknown attach mode: {}", attach_mode);
     }
 
-    let mut scalable_service_list: HashMap<_, u32, u32> =
-        HashMap::try_from(bpf.map_mut("SERVICE_LIST").unwrap())?;
-    let block_addr: u32 = Ipv4Addr::new(1, 1, 1, 1).try_into()?;
-    scalable_service_list.insert(block_addr, 0, 0)?;
-
-
-    let mut perf_array =
-        AsyncPerfEventArray::try_from(bpf.take_map("SCALE_REQUESTS").unwrap())?;
+    let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("SCALE_REQUESTS").unwrap())?;
 
     for cpu_id in online_cpus()? {
         let mut buf = perf_array.open(cpu_id, None)?;
@@ -89,11 +91,34 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }
 
+    // sync scalable_service_list with SCALABLE_PODS
+    let mut scalable_service_list: HashMap<_, u32, u32> =
+        HashMap::try_from(bpf.map_mut("SERVICE_LIST").unwrap()).unwrap();
+    loop {
+        let pod_ips = kube_watcher::SCALABLE_PODS.lock().unwrap();
+        let new_ips: HashSet<u32> = pod_ips.iter().map(|(ip, _)| ip.parse::<Ipv4Addr>().unwrap().into()).collect();
 
+        for ip in new_ips.clone() {
+            let _ = scalable_service_list.insert(ip, 0, 0);
+            debug!("Added {} to scalable_service_list", ip);
+        }
 
-    info!("Waiting for Ctrl-C...");
-    signal::ctrl_c().await?;
-    info!("Exiting...");
+        // Collect keys to remove
+        let mut keys_to_remove: Vec<u32> = Vec::new();
+        for key in scalable_service_list.keys() {
+            let ip = key.unwrap();
+            if !new_ips.contains(&ip) {
+                keys_to_remove.push(ip);
+            }
+        }
 
-    Ok(())
+        // Remove keys
+        for ip in keys_to_remove {
+            scalable_service_list.remove(&ip).unwrap();
+            debug!("Removed {} from scalable_service_list", ip);
+        }
+
+        drop(pod_ips);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }

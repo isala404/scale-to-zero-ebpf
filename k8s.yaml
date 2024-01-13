@@ -1,14 +1,15 @@
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: scale-to-zero
+  namespace: default
 rules:
 - apiGroups: [""]
-  resources: ["services"]
-  verbs: ["list"]
+  resources: ["services", "pods"]
+  verbs: ["list", "get", "watch"]
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets", "daemonsets"]
-  verbs: ["get", "update"]
+  verbs: ["get", "update", "list", "watch"]
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -17,17 +18,17 @@ metadata:
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: scale-to-zero
+  namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: scale-to-zero
 subjects:
 - kind: ServiceAccount
   name: scale-to-zero
-  namespace: default
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,7 +50,7 @@ spec:
       containers:
       - name: scale-to-zero
         command: ["/bin/sleep", "infinity"]
-        image: supiri/scale-to-zero:v2
+        image: supiri/scale-to-zero:latest
         securityContext:
           privileged: true
 ---
