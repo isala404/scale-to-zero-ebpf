@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 aya-bpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
+network-types = "0.0.5"
 scale-to-zero-common = { path = "../scale-to-zero-common" }
 
 [[bin]]

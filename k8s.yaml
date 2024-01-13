@@ -1,0 +1,109 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scale-to-zero
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["get", "update"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scale-to-zero
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scale-to-zero
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scale-to-zero
+subjects:
+- kind: ServiceAccount
+  name: scale-to-zero
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scale-to-zero
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scale-to-zero
+  template:
+    metadata:
+      labels:
+        app: scale-to-zero
+    spec:
+      serviceAccountName: scale-to-zero
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: scale-to-zero
+        command: ["/bin/sleep", "infinity"]
+        image: supiri/scale-to-zero:v2
+        securityContext:
+          privileged: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25.3
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  annotations:
+    isala.me/scale-to-zero-idle-timeout: "10"
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curl
+  template:
+    metadata:
+      labels:
+        app: curl
+    spec:
+      containers:
+      - name: curl-container
+        image: curlimages/curl
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do sleep 1; curl nginx; done"]
