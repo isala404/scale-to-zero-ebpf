@@ -22,12 +22,10 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[map]
-static SCALE_REQUESTS: PerfEventArray<PacketLog> =
-    PerfEventArray::with_max_entries(1024, 0);
+static SCALE_REQUESTS: PerfEventArray<PacketLog> = PerfEventArray::with_max_entries(1024, 0);
 
 #[map]
-static SERVICE_LIST: HashMap<u32, u32> =
-    HashMap::<u32, u32>::with_max_entries(1024, 0);
+static SERVICE_LIST: HashMap<u32, u32> = HashMap::<u32, u32>::with_max_entries(1024, 0);
 
 #[xdp]
 pub fn xdp_scale_to_zero_fw(ctx: XdpContext) -> u32 {
@@ -51,9 +49,9 @@ unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     Ok(&*ptr)
 }
 
-// 
-fn is_scalable_dst(address: u32) -> bool {
-    unsafe { SERVICE_LIST.get(&address).is_some() }
+//
+fn is_scalable_dst(address: u32) -> Option<u32> {
+    unsafe { SERVICE_LIST.get(&address).cloned() }
 }
 
 fn try_xdp_scale_to_zero_fw(ctx: XdpContext) -> Result<u32, ()> {
@@ -66,15 +64,31 @@ fn try_xdp_scale_to_zero_fw(ctx: XdpContext) -> Result<u32, ()> {
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
     let dst = u32::from_be(unsafe { (*ipv4hdr).dst_addr });
 
-    let action = if is_scalable_dst(dst) {
-        let log_entry = PacketLog {
-            ipv4_address: dst,
-            action: 1,
-        };
-        SCALE_REQUESTS.output(&ctx, &log_entry, 0);
-        xdp_action::XDP_DROP
-    } else {
-        xdp_action::XDP_PASS
+    match is_scalable_dst(dst) {
+        Some(value) => {
+            if value == 0 {
+                SCALE_REQUESTS.output(
+                    &ctx,
+                    &PacketLog {
+                        ipv4_address: dst,
+                        action: 1,
+                    },
+                    0,
+                );
+                return Ok(xdp_action::XDP_DROP);
+            }
+            SCALE_REQUESTS.output(
+                &ctx,
+                &PacketLog {
+                    ipv4_address: dst,
+                    action: 0,
+                },
+                0,
+            );
+            return Ok(xdp_action::XDP_PASS);
+        }
+        None => {
+            return Ok(xdp_action::XDP_PASS);
+        }
     };
-    Ok(action)
 }

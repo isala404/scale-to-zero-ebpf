@@ -1,34 +1,32 @@
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: scale-to-zero
-  namespace: default
 rules:
 - apiGroups: [""]
-  resources: ["services", "pods"]
+  resources: ["services"]
   verbs: ["list", "get", "watch"]
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets", "daemonsets"]
-  verbs: ["get", "update", "list", "watch"]
+  verbs: ["get", "patch", "list", "watch"]
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: scale-to-zero
-  namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: scale-to-zero
-  namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
+  kind: ClusterRole
   name: scale-to-zero
 subjects:
 - kind: ServiceAccount
   name: scale-to-zero
+  namespace: default
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,10 +47,12 @@ spec:
       hostPID: true
       containers:
       - name: scale-to-zero
-        command: ["/bin/sleep", "infinity"]
-        image: supiri/scale-to-zero:latest
+        image: supiri/scale-to-zero:latest-arm
         securityContext:
           privileged: true
+        env:
+        - name: RUST_LOG
+          value: info
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -79,7 +79,9 @@ kind: Service
 metadata:
   name: nginx
   annotations:
-    isala.me/scale-to-zero-idle-timeout: "10"
+    scale-to-zero.isala.me/scale-to-zero: "true"
+    scale-to-zero.isala.me/scale-down-time: "10" # 10 seconds
+    scale-to-zero.isala.me/reference: "deployment/nginx"
 spec:
   type: ClusterIP
   selector:
@@ -107,4 +109,4 @@ spec:
       - name: curl-container
         image: curlimages/curl
         command: ["/bin/sh"]
-        args: ["-c", "while true; do sleep 1; curl nginx; done"]
+        args: ["-c", "sleep 1000000000"]

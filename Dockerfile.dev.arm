@@ -1,0 +1,9 @@
+FROM alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache tshark
+
+COPY target/aarch64-unknown-linux-musl/release/scale-to-zero scale-to-zero
+
+CMD ["./scale-to-zero"]

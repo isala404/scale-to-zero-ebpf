@@ -7,32 +7,26 @@ use aya::{
 };
 use aya_log::BpfLogger;
 use bytes::BytesMut;
-use clap::Parser;
-use log::{info, warn, debug};
+use k8s_openapi::chrono;
+use log::{error, info, warn};
+use network_interface::NetworkInterface;
+use network_interface::NetworkInterfaceConfig;
 use scale_to_zero_common::PacketLog;
-use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use tokio::task;
-
-#[derive(Debug, Parser)]
-struct Opt {
-    #[clap(short, long, default_value = "eth0")]
-    iface: String,
-
-    #[clap(short, long, default_value = "default")]
-    attach_mode: String,
-}
 
 mod kube_watcher;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let opt = Opt::parse();
-
     env_logger::init();
 
     task::spawn(async move {
         kube_watcher::kube_event_watcher().await.unwrap();
+    });
+
+    task::spawn(async move {
+        kube_watcher::scale_down().await.unwrap();
     });
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -57,16 +51,21 @@ async fn main() -> Result<(), anyhow::Error> {
         .try_into()?;
     program.load()?;
 
-    let attach_mode = opt.attach_mode.as_str();
+    let network_interfaces = NetworkInterface::show().unwrap();
+    let network_interfaces = network_interfaces
+        .iter()
+        .map(|itf| itf.name.clone())
+        .collect::<Vec<_>>();
 
-    if attach_mode == "default" {
-        program.attach(&opt.iface, XdpFlags::default())?;
-    } else if attach_mode == "skb" {
-        program.attach(&opt.iface, XdpFlags::SKB_MODE)?;
-    } else if attach_mode == "hw" {
-        program.attach(&opt.iface, XdpFlags::HW_MODE)?;
-    } else {
-        panic!("Unknown attach mode: {}", attach_mode);
+    // let attach_modes = [XdpFlags::default(), XdpFlags::SKB_MODE, XdpFlags::HW_MODE];
+    for itf in network_interfaces.iter() {
+        info!("Attach to interface {} with {:?}", itf, XdpFlags::SKB_MODE);
+        match program.attach(&itf, XdpFlags::SKB_MODE) {
+            Ok(_) => {}
+            Err(err) => {
+                warn!("Failed to detach from interface {}: {}", itf, err);
+            }
+        }
     }
 
     let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("SCALE_REQUESTS").unwrap())?;
@@ -84,8 +83,33 @@ async fn main() -> Result<(), anyhow::Error> {
                 for buf in buffers.iter_mut().take(events.read) {
                     let ptr = buf.as_ptr() as *const PacketLog;
                     let data = unsafe { ptr.read_unaligned() };
-                    let src_addr = Ipv4Addr::from(data.ipv4_address);
-                    info!("LOG: DST {}, ACTION {}", src_addr, data.action);
+                    let dist_addr = Ipv4Addr::from(data.ipv4_address);
+                    if dist_addr.is_loopback() {
+                        continue;
+                    }
+
+                    {
+                        let mut services = kube_watcher::WATCHED_SERVICES.lock().unwrap();
+
+                        match services.get_mut(&dist_addr.to_string()) {
+                            Some(service) => {
+                                service.last_packet_time = chrono::Utc::now().timestamp();
+                            }
+                            None => {}
+                        }
+                    }
+                    if data.action == 1 {
+                        match kube_watcher::scale_up(dist_addr.to_string()).await {
+                            Ok(_) => {
+                                info!("Scaled up {}", dist_addr);
+                            }
+                            Err(err) => {
+                                if !err.to_string().starts_with("Rate Limited: Function ") {
+                                    error!("Failed to scale up {}: {}", dist_addr, err);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -95,30 +119,48 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut scalable_service_list: HashMap<_, u32, u32> =
         HashMap::try_from(bpf.map_mut("SERVICE_LIST").unwrap()).unwrap();
     loop {
-        let pod_ips = kube_watcher::SCALABLE_PODS.lock().unwrap();
-        let new_ips: HashSet<u32> = pod_ips.iter().map(|(ip, _)| ip.parse::<Ipv4Addr>().unwrap().into()).collect();
+        // debug!("Sync service list");
+        let pod_ips: std::collections::HashMap<u32, u32> = kube_watcher::WATCHED_SERVICES
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.parse::<Ipv4Addr>().unwrap().into(),
+                    v.backend_available as u32,
+                )
+            })
+            .collect();
 
-        for ip in new_ips.clone() {
-            let _ = scalable_service_list.insert(ip, 0, 0);
-            debug!("Added {} to scalable_service_list", ip);
-        }
-
-        // Collect keys to remove
-        let mut keys_to_remove: Vec<u32> = Vec::new();
-        for key in scalable_service_list.keys() {
-            let ip = key.unwrap();
-            if !new_ips.contains(&ip) {
-                keys_to_remove.push(ip);
+        for (key, value) in pod_ips.clone() {
+            match scalable_service_list.get(&key, 0) {
+                Ok(old_value) => {
+                    if old_value != value {
+                        let _ = scalable_service_list.insert(key, value, 0);
+                        info!("Update service list: {:?} {}", key, value)
+                    }
+                }
+                Err(_) => {
+                    let _ = scalable_service_list.insert(key, value, 0);
+                    info!("Add service list: {:?} {}", key, value)
+                }
             }
         }
 
-        // Remove keys
-        for ip in keys_to_remove {
-            scalable_service_list.remove(&ip).unwrap();
-            debug!("Removed {} from scalable_service_list", ip);
+        let keys: Vec<_> = scalable_service_list.keys().collect();
+        for key in keys {
+            match key {
+                Ok(ip) => {
+                    if !pod_ips.contains_key(&ip) {
+                        let _ = scalable_service_list.remove(&ip);
+                        info!("Remove service list: {:?}", ip)
+                    }
+                }
+                Err(err) => {
+                    info!("Error: {:?}", err);
+                }
+            }
         }
-
-        drop(pod_ips);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
