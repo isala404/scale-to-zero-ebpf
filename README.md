@@ -24,3 +24,12 @@ cargo build
 ```bash
 RUST_LOG=info cargo xtask run
 ```
+
+## TODOs
+
+- [ ] Add multi namespace support 
+    - currently only default namespace is supported
+- [ ] Move the scaling logic to a central operator
+    - currently will only work in single node clusters
+- [ ] Hold the request till the pod is healthy
+    - as of now the requests will fail if the pod takes longer to start

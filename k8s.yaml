@@ -79,7 +79,6 @@ kind: Service
 metadata:
   name: nginx
   annotations:
-    scale-to-zero.isala.me/scale-to-zero: "true"
     scale-to-zero.isala.me/scale-down-time: "10" # 10 seconds
     scale-to-zero.isala.me/reference: "deployment/nginx"
 spec:
