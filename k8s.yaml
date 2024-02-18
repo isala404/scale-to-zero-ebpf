@@ -29,11 +29,10 @@ subjects:
   namespace: default
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: scale-to-zero
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: scale-to-zero

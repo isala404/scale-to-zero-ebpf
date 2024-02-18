@@ -11,6 +11,7 @@ use kube::{
 };
 use log::{info, warn};
 use std::collections::HashMap;
+use std::thread;
 
 use crate::kubernetes::models::{ServiceData, WorkloadReference, WATCHED_SERVICES};
 
@@ -276,6 +277,9 @@ fn process_resource<T: K8sResource>(
         .replicas()
         .ok_or_else(|| anyhow::anyhow!("Failed to get replicas for {}", resource.name()))?;
 
+    // TODO: Check if health check is passing before setting backend_available to true
+    thread::sleep(std::time::Duration::from_secs(2));
+
     let service_ip = service
         .spec
         .as_ref()
@@ -308,6 +312,9 @@ async fn update_workload_status(
 
     info!(target: "update_workload_status", "updating workload status for service: {}, kind: {}, name: {}, namespace: {}, replicas: {}, service_ip: {}, scale_down_time: {}", service.name_any(), kind, name, namespace, replicas, service_ip, scale_down_time);
 
+    // sleep for 1 second to allow the service to be created
+    thread::sleep(std::time::Duration::from_secs(2));
+
     workload_service.insert(
         WorkloadReference {
             kind: kind.clone(),
@@ -318,6 +325,7 @@ async fn update_workload_status(
     );
     {
         let mut watched_services = WATCHED_SERVICES.lock().unwrap();
+
         watched_services.insert(
             service_ip.clone(),
             ServiceData {
